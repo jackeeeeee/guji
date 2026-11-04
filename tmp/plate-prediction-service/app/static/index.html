@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车牌预测演示</title>
+<style>
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:1060px;margin:0 auto;padding:20px;color:#1f2937;background:#f8fafc}
+h1{font-size:22px} .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:16px 0}
+button{padding:10px 18px;border:0;border-radius:8px;background:#0757cd;color:#fff;cursor:pointer;font-size:15px}
+button:disabled{opacity:.5} select{padding:9px;font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:14px} th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:middle}
+img.thumb{width:150px;height:auto;border:1px solid #ddd;border-radius:6px}
+.wrong{color:#b91c1c;font-weight:700} .ok{color:#15803d}
+.char-wrong{color:#fff;background:#dc2626;border-radius:3px;padding:0 3px}
+.note{color:#475569;font-size:13px;line-height:1.7}
+progress{width:100%}
+</style>
+</head>
+<body>
+<h1>车牌预测演示</h1>
+<p class="note">内置数据集，无需上传。默认展示 2026-11-03 夜间 HyperLPR3 在 CPU 上实跑的预计算结果；点“实时跑模型”才会在服务器上真正调用模型（需要先下载数据集，见 README）。</p>
+<div class="card">
+  <label>数据集：
+    <select id="dataset">
+      <option value="green">绿牌 8 位（CCPD2020 test，300 张）</option>
+      <option value="blue">蓝牌 7 位（CCPD2019 ccpd_fn，100 张）</option>
+      <option value="all">全部（绿牌 + 蓝牌，400 张）</option>
+    </select>
+  </label>
+  <label style="margin-left:12px"><input type="checkbox" id="errorsOnly" checked> 只看预测有误</label>
+  <button id="start" style="margin-left:12px">开始预测</button>
+  <button id="live" style="margin-left:8px;background:#334155">实时跑模型（前 50 张）</button>
+  <div id="progress" style="margin-top:12px"></div>
+</div>
+<div class="card" id="summary" style="display:none"></div>
+<div class="card" id="results" style="display:none">
+  <h2 style="margin-top:0">预测有误列表</h2>
+  <p class="note" id="resultNote"></p>
+  <table><thead><tr><th>车牌图</th><th>预测值</th><th>真实值</th><th>耗时</th><th>置信度</th></tr></thead><tbody id="tbody"></tbody></table>
+</div>
+<div class="card note">
+  <b>口径与局限：</b>全牌正确 = 全部字符一致。90.0%（绿牌）是公开 CCPD 数据上的可行性信号，不是卡口上线承诺：CCPD 为合肥停车场手持拍摄、几乎全是皖牌，与卡口近景、沪牌为主不是同一难度。蓝牌样本来自难度更高的远近子集，不可直接与绿牌对比。PaddleOCR 在试水窗口内未跑通、LPRNet 未试，均无准确率。
+</div>
+<script>
+const $=id=>document.getElementById(id);
+function chars(gt,pred){
+  let out='';
+  for(let i=0;i<Math.max(gt.length,pred.length);i++){
+    const g=gt[i]||'', p=pred[i]||'';
+    out += (g===p&&g) ? `<span>${g}</span>` : `<span class="char-wrong">${p||'·'}</span>`;
+  }
+  return out;
+}
+async function render(data){
+  const s=data.summary;
+  $('summary').style.display='block';
+  $('summary').innerHTML = `<b>模式：</b>${data.mode==='live'?'实时模型':'预计算（2026-11-03 实跑记录）'}　
+    <b>样本：</b>${s.n} 张　<b>全牌准确率：</b>${(s.full_accuracy*100).toFixed(1)}%（${s.full_correct}/${s.n}）　
+    <b>检出率：</b>${(s.detected_rate*100).toFixed(1)}%　<b>单字准确率：</b>${(s.char_accuracy*100).toFixed(1)}%　
+    <b>总耗时：</b>${s.total_time_sec} 秒　<b>平均：</b>${s.mean_time_sec} 秒/张`;
+  $('results').style.display='block';
+  const errs=data.rows.filter(r=>!r.full_correct);
+  $('resultNote').textContent = `共 ${data.rows.length} 条，预测有误 ${errs.length} 条。未检出的预测值为空；图片仅在随包附带的样本图或已下载数据集存在时显示。`;
+  $('tbody').innerHTML = errs.map(r=>`<tr>
+    <td>${r.image_url?`<img class="thumb" src="${r.image_url}" alt="${r.filename}">`:'<span class="note">原图未随包附带</span><br><span class="note">${r.filename}</span>'}</td>
+    <td class="wrong">${r.predicted||'（未检出）'}</td>
+    <td>${chars(r.ground_truth,r.predicted)}</td>
+    <td>${r.time_sec} 秒</td><td>${r.confidence===''?'—':r.confidence}</td></tr>`).join('') || '<tr><td colspan="5">本数据集无预测错误。</td></tr>';
+}
+$('start').onclick = async ()=>{
+  $('progress').innerHTML='<progress max="100" value="40"></progress> 正在读取预计算结果…';
+  const ds=$('dataset').value, eo=$('errorsOnly').checked;
+  const res=await fetch(`/api/results?dataset=${ds}&errors_only=${eo}`);
+  const data=await res.json();
+  // errors_only=true 时后端仍返回全量 summary；行数按复选框过滤展示
+  if(eo) data.rows=data.rows.filter(r=>!r.full_correct);
+  $('progress').innerHTML='';
+  render(data);
+};
+$('live').onclick = async ()=>{
+  $('progress').innerHTML='<progress></progress> 正在服务器上实时跑模型（前 50 张），请稍候…';
+  const res=await fetch('/api/predict-live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:$('dataset').value,limit:50})});
+  if(!res.ok){ $('progress').textContent='实时预测不可用：'+(await res.json()).detail; return; }
+  const data=await res.json(); $('progress').innerHTML=''; render(data);
+};
+</script>
+</body>
+</html>
